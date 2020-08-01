@@ -39,6 +39,7 @@ public class SparkTranssetAnalyser {
 
 			SparkTranssetAnalyser app = new SparkTranssetAnalyser();
 			app.groupPLUByDate(sparkSession, transactionDS);
+			app.groupNumberOfPLUSales(sparkSession, transactionDS);
 			
 			/*
 			 * Add your query api's here.
@@ -49,6 +50,37 @@ public class SparkTranssetAnalyser {
 			SparkSession.clearActiveSession();
 		}
 
+	}
+
+	private void groupNumberOfPLUSales(SparkSession sparkSession, Dataset<Row> transactionDS) {
+
+		Dataset<Row> trLines = transactionDS.select(col("trans.trHeader.trTickNum.trSeq").as("TxnNum"), col("trans.type").alias("tranType"),
+				explode(col("trans.trLines.trLine")).as("trLines"));
+		trLines.createOrReplaceTempView("itemlines");
+		creatingNonRefundSales(sparkSession, transactionDS);
+		deptSales(sparkSession);
+		pluSales(sparkSession);
+		
+	}
+
+	private void creatingNonRefundSales(SparkSession sparkSession, Dataset<Row> transactionDS) {
+		Dataset<Row> nonRefundSales = sparkSession.sql("SELECT  * FROM itemlines WHERE tranType!=\"refund sale\" OR tranType!=\"refund network sale\"");	
+		nonRefundSales.createOrReplaceTempView("nonRefundSales");
+	}
+
+	private void pluSales(SparkSession sparkSession) {
+		Dataset<Row> trlUpcc = sparkSession.sql(
+				"SELECT SUM(trLines.trlQty), trLines.trlUPC, trLines.trlDesc FROM itemLines WHERE trLines.trlUPC IS NOT NULL  GROUP BY trLines.trlUPC, trLines.trlDesc");
+		trlUpcc.show();
+	}
+
+	private void deptSales(SparkSession sparkSession) {
+		Dataset<Row> trlDept = sparkSession.sql(
+				"SELECT COUNT(trLines.trlDept), trLines.trlDept.value, tranType FROM nonRefundSales WHERE tranType = \"sale\" OR tranType = \"network sale\" GROUP BY trLines.trlDept,tranType");
+		trlDept.show();
+		Dataset<Row> trlDept1 = sparkSession
+				.sql("SELECT COUNT(trLines.trlDept), trLines.trlDept.value FROM nonRefundSales GROUP BY trLines.trlDept");
+		trlDept1.show();
 	}
 
 	/**
