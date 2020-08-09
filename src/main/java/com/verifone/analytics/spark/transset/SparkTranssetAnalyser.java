@@ -64,7 +64,7 @@ public class SparkTranssetAnalyser {
 		}
 
 	}
-	
+
 	/**
 	 * 
 	 * Transforms the transset data from 'transactions' collections at txnDB and writes the 
