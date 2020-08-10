@@ -6,16 +6,32 @@ import static org.apache.spark.sql.functions.substring;
 import static org.apache.spark.sql.functions.to_date;
 import static org.apache.spark.sql.functions.to_utc_timestamp;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 
+import org.apache.log4j.Level;
+import org.apache.log4j.Logger;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.ml.feature.StringIndexer;
+import org.apache.spark.ml.feature.VectorAssembler;
+import org.apache.spark.ml.regression.LinearRegression;
+import org.apache.spark.ml.regression.LinearRegressionModel;
 import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Encoder;
+import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 
 import com.mongodb.spark.MongoSpark;
 import com.mongodb.spark.config.WriteConfig;
+//import com.verifone.analytics.LinearRegression;
+//import com.verifone.analytics.LinearRegressionModel;
+//import com.verifone.analytics.StringIndexer;
+//import com.verifone.analytics.VectorAssembler;
 
 /**
  * This spark application is  
@@ -23,6 +39,23 @@ import com.mongodb.spark.config.WriteConfig;
  */
 public class SparkTranssetAnalyser {
 	
+	private static final int N = 10;
+	private static final String COUNT_DEPT = "count(Dept)";
+	private static final String SUM_QTY = "sum(Qty)";
+	private static final String COUNT = "Count";
+	
+	private static final String GROUP_BY_DATE_CAT_VALUE_CAT_NUMBER = "\" GROUP BY Date, Cat.value, Cat.number, Qty";
+	private static final String SELECT_DATE_CAT_VALUE_CAT_NUMBER_COUNT_FROM_NON_REFUND_SALES_WHERE_CAT_IS_NOT_NULL_AND_DATE =
+			"SELECT Date, Cat.number As CategoryNum, Cat.value As CategoryDesc, SUM(Qty) FROM nonRefundSales WHERE Cat IS NOT NULL AND Date=\"";
+	private static final String GROUP_BY_DATE_DEPT_NUMBER_DEPT_VALUE = "\" GROUP BY Date, Dept.number, Dept.value";
+	private static final String SELECT_DATE_DEPT_NUMBER_DEPT_VALUE_COUNT_DEPT_FROM_NON_REFUND_SALES_WHERE_DATE = 
+			"SELECT Date, Dept.number As DeptNum, Dept.value As DeptDesc, COUNT(Dept) FROM nonRefundSales WHERE Date=\"";
+
+	private static final String SELECT_DATE_UPC_NUM_UPC_DESC_SUM_QTY_FROM_NON_REFUND_SALES_WHERE_DATE =
+			"SELECT Date, UPCNum, UPCDesc, SUM(Qty) FROM nonRefundSales WHERE Date=\""; 
+	private static final String AND_UPC_NUM_IS_NOT_NULL_GROUP_BY_DATE_UPC_NUM_UPC_DESC_QTY = 
+			"\" AND UPCNum IS NOT NULL GROUP BY Date, UPCNum, UPCDesc, Qty";
+
 	private static JavaSparkContext jsc = null;
 	private static boolean initializeWriteConfig = false;
 	private static Map<String, String> writeConfigOverrides = null; 
@@ -30,12 +63,13 @@ public class SparkTranssetAnalyser {
 
 	public static void main(String[] args) {
 		// Get site Id from the arug
+		Logger.getLogger("org").setLevel(Level.ERROR); // this will prevent INFO logs, on console
 		siteId = args[0];
 		
-		try (SparkSession sparkSession = SparkSession.builder().master("local").appName("TranssetAnalyser")
+		try(SparkSession sparkSession = SparkSession.builder().master("local").appName("TranssetAnalyser")
 				.config("spark.mongodb.input.uri", "mongodb://127.0.0.1/txnDB."+siteId) // e.g., txnDB.site1
 				.config("spark.mongodb.output.uri", "mongodb://127.0.0.1/txnDB.plus").getOrCreate();) {
-			
+
 			jsc = new JavaSparkContext(sparkSession.sparkContext());
 
 			Dataset<Row> transactionDS = MongoSpark.load(jsc).toDF();
@@ -44,12 +78,17 @@ public class SparkTranssetAnalyser {
 
 			SparkTranssetAnalyser app = new SparkTranssetAnalyser();
 			
-			app.salesByUPCTop(sparkSession, transactionDS);
-			app.salesByUPCBottom(sparkSession, transactionDS);
-			app.salesByCategoryTop(sparkSession, transactionDS);
-			app.salesByCategoryBottom(sparkSession, transactionDS);
-			app.salesByDepartmentTop(sparkSession, transactionDS);
-			app.salesByDepartmentBottom(sparkSession, transactionDS);
+			String trDate = "Date";
+			Dataset<Row> trLines = renamingColumsCreatingItemLinesView(transactionDS, trDate);
+			app.creatingNonRefundSales(sparkSession, transactionDS);
+			Dataset<Row> distinctDatesDataSet = trLines.select(col(trDate)).sort(col(trDate)).distinct();
+			app.salesByUPCTop(sparkSession, N, distinctDatesDataSet);
+			app.salesByUPCBottom(sparkSession, N, distinctDatesDataSet);
+			app.salesByCategoryTop(sparkSession, N, distinctDatesDataSet);
+			app.salesByCategoryBottom(sparkSession, N, distinctDatesDataSet);
+			app.salesByDepartmentTop(sparkSession, N, distinctDatesDataSet);
+			app.salesByDepartmentBottom(sparkSession, N, distinctDatesDataSet);
+			
 			app.salesByFuelProduct(sparkSession, transactionDS);
 			app.customerWaitTimeByCashier(sparkSession, transactionDS);
 			app.dailySalesCount(sparkSession, transactionDS);
@@ -59,13 +98,54 @@ public class SparkTranssetAnalyser {
 			app.salesByEntryMethod(sparkSession, transactionDS);
 			app.discountsByLoyaltyProgram(sparkSession, transactionDS);
 			app.recurringCustomerCount(sparkSession, transactionDS);
-
+			app.linearRegression(sparkSession);
+		} catch (Exception e) {
 		} finally {
-			jsc.close();
-			SparkSession.clearActiveSession();
 		}
-
+		jsc.close();
+		SparkSession.clearActiveSession();
 	}
+
+	private void creatingNonRefundSales(SparkSession sparkSession, Dataset<Row> transactionDS) {
+		Dataset<Row> nonRefundSales = sparkSession.sql(
+				"SELECT Date, TxnNum, UPCNum, UPCDesc, Dept, Cat, Qty, tranType trLines FROM itemlines WHERE tranType!=\"refund sale\" OR tranType!=\"refund network sale\" OR tranType!=\"void\"");
+		nonRefundSales.createOrReplaceTempView("nonRefundSales");
+	}
+
+	private static Dataset<Row> renamingColumsCreatingItemLinesView(Dataset<Row> transactionDS, String trDate) {
+		Dataset<Row> trLines = transactionDS.select(substring(col("trans.trHeader.date"), 0, 10).as(trDate),
+				col("trans.trHeader.trTickNum.trSeq").as("TxnNum"),
+				col("trLines.trlUPC").as("UPCNum"),
+				col("trLines.trlDesc").alias("UPCDesc"),
+				col("trLines.trlDept").as("Dept"),
+				col("trLines.trlCat").as("Cat"),
+				col("trLines.trlQty").as("Qty"), col("trans.type").alias("tranType"),
+				explode(col("trans.trLines.trLine")).as("trLines"));
+		trLines.createOrReplaceTempView("itemlines");
+		return trLines;
+	}	
+
+	private void linearRegression(SparkSession sparkSession) {
+		Dataset<Row> csvData = sparkSession.read().option("header", "true").option("inferSchema", "true").format("csv")
+				.load("Book1.csv");
+		Dataset<Row> formattedDf = new StringIndexer().setInputCol("Day").setOutputCol("DayVal").fit(csvData)
+				.transform(csvData);
+		Dataset<Row> finalDf = new VectorAssembler()
+				.setInputCols(new String[] { "Discount", "TotCustCount", "DayVal", "IndoorCustCount" })
+				.setOutputCol("features").transform(formattedDf).withColumnRenamed("QtySold", "label")
+				.select("label", "features");
+		Dataset<Row>[] splits = finalDf.randomSplit(new double[] { 0.9, 0.1 });
+		Dataset<Row> trainingData = splits[0];
+		Dataset<Row> holdOutData = splits[1];
+
+		LinearRegressionModel lrModel = new LinearRegression().fit(trainingData);
+
+		Dataset<Row> predictions = lrModel.transform(holdOutData);
+
+		predictions.select("label", "prediction", "features").show(false);
+		
+	}
+
 
 	/**
 	 * 
@@ -73,43 +153,142 @@ public class SparkTranssetAnalyser {
 	 * result data 
 	 * 
 	 * @param sparkSession
+	 * @param n 
 	 * @param transactionDS
 	 */
-	private void salesByUPCTop(SparkSession sparkSession, Dataset<Row> transactionDS) {
-
-		Dataset<Row> trLines = transactionDS.select(substring(col("trans.trHeader.date"), 0, 10).as("trDate"),
-				explode(col("trans.trLines.trLine")).as("trLine"));
-		Dataset<Row> filteredPLUWithDate = trLines.filter(col("trLine.type").equalTo("plu"))
-				.select(col("trDate"), col("trLine.trlDesc").as("trPluDesc")).sort(col("trDate").asc());
-		Dataset<Row> salesByUpcDF = filteredPLUWithDate.groupBy("trPluDesc", "trDate").count();
-		salesByUpcDF.show();
-		
-		writeToResultSetDB(salesByUpcDF, "salesByUPC");
-		
-	}
-
-	private void salesByUPCBottom(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		// TODO Auto-generated method stub
-		
-	}
-
-	private void salesByCategoryTop(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		// TODO Auto-generated method stub
-		
-	}
-
-	private void salesByCategoryBottom(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		// TODO Auto-generated method stub
+	private void salesByUPCTop(SparkSession sparkSession, int n, Dataset<Row> distinctDatesDataSet) {
+		System.out.println("+++++++++++++Date-wise Top Plu Sales+++++++++++++++++++++++++++");
+		List<Row> distinctDatesList = distinctDatesDataSet.collectAsList();
+		Iterator<Row> it = distinctDatesList.iterator();
+		String firstDate = it.next().mkString();
+		System.out.println(SELECT_DATE_UPC_NUM_UPC_DESC_SUM_QTY_FROM_NON_REFUND_SALES_WHERE_DATE + firstDate
+				+ AND_UPC_NUM_IS_NOT_NULL_GROUP_BY_DATE_UPC_NUM_UPC_DESC_QTY);
+		Dataset<Row> intermediateResult1 = sparkSession
+				.sql(SELECT_DATE_UPC_NUM_UPC_DESC_SUM_QTY_FROM_NON_REFUND_SALES_WHERE_DATE + firstDate
+						+ AND_UPC_NUM_IS_NOT_NULL_GROUP_BY_DATE_UPC_NUM_UPC_DESC_QTY)
+				.sort(col(SUM_QTY).desc()).limit(n).withColumnRenamed(SUM_QTY, COUNT);
+		Dataset<Row> salesByUpcTop = intermediateResult1;
+		while (it.hasNext()) {
+			String date = it.next().mkString();
+			Dataset<Row> intermediateResult2 = sparkSession
+					.sql(SELECT_DATE_UPC_NUM_UPC_DESC_SUM_QTY_FROM_NON_REFUND_SALES_WHERE_DATE + date
+							+ AND_UPC_NUM_IS_NOT_NULL_GROUP_BY_DATE_UPC_NUM_UPC_DESC_QTY)
+					.sort(col(SUM_QTY).desc()).limit(n).withColumnRenamed(SUM_QTY, COUNT);
+			salesByUpcTop = salesByUpcTop.union(intermediateResult2);
+		}
+		salesByUpcTop.show();
+		writeToResultSetDB(salesByUpcTop, "salesByUpcTop");
 		
 	}
 
-	private void salesByDepartmentTop(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		// TODO Auto-generated method stub
+	private void salesByUPCBottom(SparkSession sparkSession, int n, Dataset<Row> distinctDatesDataSet) {
+		System.out.println("+++++++++++++Date-wise bottom plu Sales+++++++++++++++++++++++++++");
+		List<Row> distinctDatesList = distinctDatesDataSet.collectAsList();
+		Iterator<Row> it = distinctDatesList.iterator();
+		String firstDate = it.next().mkString();
+		Dataset<Row> intermediateResult1 = sparkSession
+				.sql(SELECT_DATE_UPC_NUM_UPC_DESC_SUM_QTY_FROM_NON_REFUND_SALES_WHERE_DATE + firstDate
+						+ AND_UPC_NUM_IS_NOT_NULL_GROUP_BY_DATE_UPC_NUM_UPC_DESC_QTY)
+				.sort(col(SUM_QTY).asc()).limit(n).withColumnRenamed(SUM_QTY, COUNT);
+		Dataset<Row> salesByUpcBottom = intermediateResult1;
+		while (it.hasNext()) {
+			String date = it.next().mkString();
+			Dataset<Row> intermediateResult2 = sparkSession
+					.sql(SELECT_DATE_UPC_NUM_UPC_DESC_SUM_QTY_FROM_NON_REFUND_SALES_WHERE_DATE + date
+							+ AND_UPC_NUM_IS_NOT_NULL_GROUP_BY_DATE_UPC_NUM_UPC_DESC_QTY)
+					.sort(col(SUM_QTY).asc()).limit(n).withColumnRenamed(SUM_QTY, COUNT);
+			salesByUpcBottom = salesByUpcBottom.union(intermediateResult2);
+		}
+		salesByUpcBottom.show();
+		writeToResultSetDB(salesByUpcBottom, "salesByUpcBottom");
 		
 	}
 
-	private void salesByDepartmentBottom(SparkSession sparkSession, Dataset<Row> transactionDS) {
-	// TODO Auto-generated method stub
+	private void salesByCategoryTop(SparkSession sparkSession, int n, Dataset<Row> distinctDatesDataSet) {
+		System.out.println("+++++++++++++Date-wise top cat Sales+++++++++++++++++++++++++++");
+		List<Row> distinctDatesList = distinctDatesDataSet.collectAsList();
+		Iterator<Row> it = distinctDatesList.iterator();
+		String date = it.next().mkString();
+		Dataset<Row> intermediateResult1 = sparkSession
+				.sql(SELECT_DATE_CAT_VALUE_CAT_NUMBER_COUNT_FROM_NON_REFUND_SALES_WHERE_CAT_IS_NOT_NULL_AND_DATE + date
+						+ GROUP_BY_DATE_CAT_VALUE_CAT_NUMBER)
+				.sort(col(SUM_QTY).desc()).limit(n).withColumnRenamed(SUM_QTY, COUNT);
+		Dataset<Row> salesByCategoryTop = intermediateResult1;
+		while (it.hasNext()) {
+			String datee = it.next().mkString();
+			Dataset<Row> intermediateResult2 = sparkSession
+					.sql(SELECT_DATE_CAT_VALUE_CAT_NUMBER_COUNT_FROM_NON_REFUND_SALES_WHERE_CAT_IS_NOT_NULL_AND_DATE
+							+ datee + GROUP_BY_DATE_CAT_VALUE_CAT_NUMBER)
+					.sort(col(SUM_QTY).desc()).limit(n).withColumnRenamed(SUM_QTY, COUNT);
+			salesByCategoryTop = salesByCategoryTop.union(intermediateResult2);
+		}
+		salesByCategoryTop.show();
+		writeToResultSetDB(salesByCategoryTop, "salesByCategoryTop");
+		System.out.println("---------------------------------------------------------------");
+		
+	}
+
+	private void salesByCategoryBottom(SparkSession sparkSession, int n, Dataset<Row> distinctDatesDataSet) {
+		System.out.println("+++++++++++++Date-wise bottom cat Sales+++++++++++++++++++++++++++");
+        List<Row> distinctDatesList = distinctDatesDataSet.collectAsList();
+        Iterator<Row> it = distinctDatesList.iterator();
+        String date = it.next().mkString();
+        Dataset<Row> intermediateResult1 = sparkSession
+                     .sql(SELECT_DATE_CAT_VALUE_CAT_NUMBER_COUNT_FROM_NON_REFUND_SALES_WHERE_CAT_IS_NOT_NULL_AND_DATE + date
+                                  + GROUP_BY_DATE_CAT_VALUE_CAT_NUMBER)
+                      .sort(col(SUM_QTY).asc()).limit(n).withColumnRenamed(SUM_QTY, COUNT);
+        Dataset<Row> salesByCategoryBottom = intermediateResult1;
+        while (it.hasNext()) {
+               String datee = it.next().mkString();
+               Dataset<Row> intermediateResult2 = sparkSession
+                            .sql(SELECT_DATE_CAT_VALUE_CAT_NUMBER_COUNT_FROM_NON_REFUND_SALES_WHERE_CAT_IS_NOT_NULL_AND_DATE + datee
+                                         + GROUP_BY_DATE_CAT_VALUE_CAT_NUMBER)
+                            .sort(col(SUM_QTY).asc()).limit(n).withColumnRenamed(SUM_QTY, COUNT);
+               salesByCategoryBottom = salesByCategoryBottom.union(intermediateResult2);
+        }
+        salesByCategoryBottom.show();
+    	writeToResultSetDB(salesByCategoryBottom, "salesByCategoryBottom");
+        System.out.println("---------------------------------------------------------------");
+	}
+
+	private void salesByDepartmentTop(SparkSession sparkSession, int n, Dataset<Row> distinctDatesDataSet) {
+		System.out.println("+++++++++++++Date-wise Top dept Sales+++++++++++++++++++++++++++");
+		List<Row> distinctDatesList = distinctDatesDataSet.collectAsList();
+		Iterator<Row> it = distinctDatesList.iterator();
+		String date = it.next().mkString();
+		Dataset<Row> intermediateResult1 = sparkSession
+				.sql(SELECT_DATE_DEPT_NUMBER_DEPT_VALUE_COUNT_DEPT_FROM_NON_REFUND_SALES_WHERE_DATE + date
+						+ GROUP_BY_DATE_DEPT_NUMBER_DEPT_VALUE).sort(col(COUNT_DEPT).desc()).limit(n).withColumnRenamed(COUNT_DEPT, COUNT);
+		Dataset<Row> salesByDepartmentTop = intermediateResult1;
+		while (it.hasNext()) {
+		date = it.next().mkString();
+		Dataset<Row> topnDeptperDay = sparkSession
+				.sql(SELECT_DATE_DEPT_NUMBER_DEPT_VALUE_COUNT_DEPT_FROM_NON_REFUND_SALES_WHERE_DATE + date
+						+ GROUP_BY_DATE_DEPT_NUMBER_DEPT_VALUE).sort(col(COUNT_DEPT).desc()).limit(n).withColumnRenamed(COUNT_DEPT, COUNT);;
+		salesByDepartmentTop = salesByDepartmentTop.union(topnDeptperDay);
+		}
+		salesByDepartmentTop.show();
+		writeToResultSetDB(salesByDepartmentTop, "salesByDepartmentTop");
+	}
+
+	private void salesByDepartmentBottom(SparkSession sparkSession, int n, Dataset<Row> distinctDatesDataSet) {
+		System.out.println("+++++++++++++Date-wise bottom dept Sales+++++++++++++++++++++++++++");
+		List<Row> distinctDatesList = distinctDatesDataSet.collectAsList();
+		Iterator<Row> it = distinctDatesList.iterator();
+		String date = it.next().mkString();
+		Dataset<Row> intermediateResult1 = sparkSession
+				.sql(SELECT_DATE_DEPT_NUMBER_DEPT_VALUE_COUNT_DEPT_FROM_NON_REFUND_SALES_WHERE_DATE + date
+						+ GROUP_BY_DATE_DEPT_NUMBER_DEPT_VALUE).sort(col(COUNT_DEPT).asc()).limit(n).withColumnRenamed(COUNT_DEPT, COUNT);
+		Dataset<Row> salesByDepartmentBottom = intermediateResult1;
+		while (it.hasNext()) {
+		date = it.next().mkString();
+		Dataset<Row> topnDeptperDay = sparkSession
+				.sql(SELECT_DATE_DEPT_NUMBER_DEPT_VALUE_COUNT_DEPT_FROM_NON_REFUND_SALES_WHERE_DATE + date
+						+ GROUP_BY_DATE_DEPT_NUMBER_DEPT_VALUE).sort(col(COUNT_DEPT).asc()).limit(n).withColumnRenamed(COUNT_DEPT, COUNT);
+		salesByDepartmentBottom = salesByDepartmentBottom.union(topnDeptperDay);
+		}
+		salesByDepartmentBottom.show();
+		writeToResultSetDB(salesByDepartmentBottom, "salesByDepartmentBottom");
 	
 	}
 
