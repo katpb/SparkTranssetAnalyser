@@ -6,10 +6,8 @@ import static org.apache.spark.sql.functions.substring;
 import static org.apache.spark.sql.functions.to_date;
 import static org.apache.spark.sql.functions.to_utc_timestamp;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 
@@ -21,8 +19,6 @@ import org.apache.spark.ml.feature.VectorAssembler;
 import org.apache.spark.ml.regression.LinearRegression;
 import org.apache.spark.ml.regression.LinearRegressionModel;
 import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Encoder;
-import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 
@@ -293,7 +289,7 @@ public class SparkTranssetAnalyser {
 	}
 
 	private void salesByFuelProduct(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		Dataset<Row> trLines = transactionDS.select(to_date(to_utc_timestamp(col("trans.trHeader.date"),"YYYY-MM-DD")).as("trDate"),col("trans.type"), col("trans.trValue"),
+		Dataset<Row> trLines = transactionDS.select(substring(col("trans.trHeader.date"), 0, 10).as("trDate"),col("trans.type"), col("trans.trValue"),
 				col("trans.trHeader.trTickNum.trSeq"),explode(col("trans.trLines.trLine")).as("trLines")).filter(col("trLines.type").equalTo("postFuel"));
 		trLines.createOrReplaceTempView("itemlines");
 		trLines.show();
@@ -306,7 +302,7 @@ public class SparkTranssetAnalyser {
 	}
 
 	private void customerWaitTimeByCashier(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		Dataset<Row> transactions = transactionDS.select(to_date(to_utc_timestamp(col("trans.trHeader.date"),"YYYY-MM-DD")).as("Date"),col("trans.trHeader.cashier.value").as("CashierName"),
+		Dataset<Row> transactions = transactionDS.select(substring(col("trans.trHeader.date"), 0, 10).as("Date"),col("trans.trHeader.cashier.value").as("CashierName"),
 				col("trans.trHeader.duration").as("WaitTime"));
 		transactions.createOrReplaceTempView("transactionsByCashier");
 		transactions.show();
@@ -316,7 +312,7 @@ public class SparkTranssetAnalyser {
 	}
 
 	private void dailySalesCount(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		Dataset<Row> transactions = transactionDS.select(to_date(to_utc_timestamp(col("trans.trHeader.date"),"YYYY-MM-DD")).as("Date"),col("trans.type"));
+		Dataset<Row> transactions = transactionDS.select(substring(col("trans.trHeader.date"), 0, 10).as("Date"),col("trans.type"));
 		transactions.createOrReplaceTempView("transactionCounts");
 		transactions.show();
 		Dataset<Row> dailySalesCount  = sparkSession.sql("select Date,count(type) as TxnCount from transactionCounts GROUP BY Date order by Date desc");
@@ -326,7 +322,7 @@ public class SparkTranssetAnalyser {
 	}
 
 	private void averageTransactionAmount(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		Dataset<Row> transactions = transactionDS.select(to_date(to_utc_timestamp(col("trans.trHeader.date"),"YYYY-MM-DD")).as("Date"),col("trans.type"),
+		Dataset<Row> transactions = transactionDS.select(substring(col("trans.trHeader.date"), 0, 10).as("Date"),col("trans.type"),
 				col("trans.trValue.trTotWTax"));
 		transactions.createOrReplaceTempView("transactionTotals");
 		transactions.show();
@@ -337,7 +333,7 @@ public class SparkTranssetAnalyser {
 	}
 
 	private void salesByMOP(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		Dataset<Row> trPayLines = transactionDS.select(to_date(to_utc_timestamp(col("trans.trHeader.date"),"YYYY-MM-DD")).as("trDate"),col("trans.type"),
+		Dataset<Row> trPayLines = transactionDS.select(substring(col("trans.trHeader.date"), 0, 10).as("trDate"),col("trans.type"),
 				(explode(col("trans.trPaylines.trPayline")).as("trPaylines"))).filter(col("trPaylines.trpPayCode.value").notEqual("Change"));
 		trPayLines.createOrReplaceTempView("paymentlines");
 		trPayLines.show();
@@ -350,7 +346,7 @@ public class SparkTranssetAnalyser {
 	}
 
 	private void salesByCardType(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		Dataset<Row> trPayLines = transactionDS.select(to_date(to_utc_timestamp(col("trans.trHeader.date"),"YYYY-MM-DD")).as("trDate"),col("trans.type"),
+		Dataset<Row> trPayLines = transactionDS.select(substring(col("trans.trHeader.date"), 0, 10).as("trDate"),col("trans.type"),
 				(explode(col("trans.trPaylines.trPayline")).as("trPaylines"))).filter(col("trPaylines.trpPayCode.value").notEqual("Change"));
 		trPayLines.createOrReplaceTempView("paymentlines");
 		Dataset<Row> salesByCardType = sparkSession
@@ -360,7 +356,7 @@ public class SparkTranssetAnalyser {
 	}
 
 	private void salesByEntryMethod(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		Dataset<Row> trPayLines = transactionDS.select(to_date(to_utc_timestamp(col("trans.trHeader.date"),"YYYY-MM-DD")).as("trDate"),col("trans.type"),
+		Dataset<Row> trPayLines = transactionDS.select(substring(col("trans.trHeader.date"), 0, 10).as("trDate"),col("trans.type"),
 				(explode(col("trans.trPaylines.trPayline")).as("trPaylines"))).filter(col("trPaylines.trpPayCode.value").notEqual("Change"));
 		trPayLines.createOrReplaceTempView("paymentlines");
 		Dataset<Row> salesByEntryMethod = sparkSession
@@ -370,7 +366,7 @@ public class SparkTranssetAnalyser {
 	}
 
 	private void discountsByLoyaltyProgram(SparkSession sparkSession, Dataset<Row> transactionDS) {
-		Dataset<Row> trLines = transactionDS.select(to_date(to_utc_timestamp(col("trans.trHeader.date"),"YYYY-MM-DD")).as("trDate"),col("trans.type"), col("trans.trValue"),
+		Dataset<Row> trLines = transactionDS.select(substring(col("trans.trHeader.date"), 0, 10).as("trDate"),col("trans.type"), col("trans.trValue"),
 				explode(col("trans.trLines.trLine")).as("trLines"),col("trans.trHeader.trTickNum.trSeq"));
 		trLines.createOrReplaceTempView("itemlines");
 		trLines.show();
